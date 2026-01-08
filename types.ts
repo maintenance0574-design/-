@@ -11,7 +11,7 @@ export interface Transaction {
   type: TransactionType;
   materialName: string;    // 料件名稱
   materialNumber: string;  // 料號
-  itemName: string;        // 項目/摘要名稱
+  machineNumber: string;   // 機台編號
   quantity: number;
   unitPrice: number;
   total: number;

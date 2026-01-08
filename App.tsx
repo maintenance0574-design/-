@@ -5,75 +5,30 @@ import TransactionForm from './components/TransactionForm';
 import Dashboard from './components/Dashboard';
 import { analyzeWarehouseData } from './services/geminiService';
 import { dbService } from './services/dbService';
+import { exportToExcel } from './services/reportService';
 
-const GOOGLE_SCRIPT_CODE = `// 倉儲系統專用腳本 V4.0 - 支援多工作表分類
-function doGet(e) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheetNames = ["進貨", "用料", "建置"];
-  var allData = [];
-  
-  sheetNames.forEach(function(name) {
-    var sheet = ss.getSheetByName(name);
-    if (!sheet) {
-      sheet = ss.insertSheet(name);
-      sheet.appendRow(["id", "date", "type", "itemName", "quantity", "unitPrice", "total", "note"]);
-      return;
-    }
-    
-    var data = sheet.getDataRange().getValues();
-    if (data.length <= 1) return;
-    
-    var headers = data.shift();
-    var json = data.map(function(row) {
-      var obj = {};
-      headers.forEach(function(header, i) { obj[header] = row[i]; });
-      return obj;
-    });
-    allData = allData.concat(json);
-  });
-  
-  return createJsonOutput(allData);
-}
-
-function doPost(e) {
-  var params = JSON.parse(e.postData.contents);
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  
-  if (params.action === 'insert') {
-    var sheetName = params.data.type;
-    var sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow(["id", "date", "type", "itemName", "quantity", "unitPrice", "total", "note"]);
-    }
-    sheet.appendRow([params.data.id, params.data.date, params.data.type, params.data.itemName, params.data.quantity, params.data.unitPrice, params.data.total, params.data.note]);
-  } else if (params.action === 'delete') {
-    // 優先搜尋指定的類別工作表，若無則搜尋全部
-    var sheetNames = params.type ? [params.type] : ["進貨", "用料", "建置"];
-    sheetNames.forEach(function(name) {
-      var sheet = ss.getSheetByName(name);
-      if (!sheet) return;
-      var data = sheet.getDataRange().getValues();
-      for (var i = 1; i < data.length; i++) {
-        if (data[i][0] === params.id) { sheet.deleteRow(i + 1); break; }
-      }
-    });
-  }
-  return createJsonOutput({status: "Success"});
-}
-
-function createJsonOutput(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
-}`;
+// 已更新為您提供的專屬部署網址
+const DEFAULT_URL = "https://script.google.com/macros/s/AKfycbzcEs1dizcea8uBRytCpgzslGiMzsEc4DsrxqHc4wdag4yBf0DBOxYl55sR2Fjkn_VT/exec";
 
 const App: React.FC = () => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'records' | 'ai' | 'settings'>('dashboard');
+  const [recordFilter, setRecordFilter] = useState<'全部' | TransactionType>('全部');
+  const [selectedExportMonth, setSelectedExportMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
   const [aiReport, setAiReport] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [dbStatus, setDbStatus] = useState<'connected' | 'local' | 'error' | 'unconfigured'>('unconfigured');
-  const [scriptUrl, setScriptUrl] = useState(localStorage.getItem('google_sheet_script_url') || '');
-  const [testResult, setTestResult] = useState<{success: boolean, message: string, detail?: string} | null>(null);
+  
+  // 初始化檢查：若 localStorage 沒有網址，自動填入預設網址
+  useEffect(() => {
+    if (!localStorage.getItem('google_sheet_script_url')) {
+      localStorage.setItem('google_sheet_script_url', DEFAULT_URL);
+    }
+  }, []);
+
+  const [scriptUrl, setScriptUrl] = useState(localStorage.getItem('google_sheet_script_url') || DEFAULT_URL);
+  const [testResult, setTestResult] = useState<{success: boolean, message: string} | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [useLocalOnly, setUseLocalOnly] = useState(localStorage.getItem('use_local_only') === 'true');
 
@@ -86,18 +41,14 @@ const App: React.FC = () => {
       setIsLoading(false);
       return;
     }
-
     if (!dbService.isConfigured()) {
       setDbStatus('unconfigured');
-      setActiveTab('settings');
       setIsLoading(false);
       return;
     }
-
     try {
       const data = await dbService.fetchAll();
-      // 按日期排序
-      const sorted = data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      const sorted = (data || []).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       setTransactions(sorted);
       setDbStatus('connected');
     } catch (e) {
@@ -109,10 +60,14 @@ const App: React.FC = () => {
 
   useEffect(() => { loadData(); }, [useLocalOnly]);
 
+  const filteredTransactions = recordFilter === '全部' 
+    ? transactions 
+    : transactions.filter(t => t.type === recordFilter);
+
   const handleSaveSettings = () => {
     const url = scriptUrl.trim();
     if (!url.startsWith('https://script.google.com/')) {
-      alert("❌ 網址格式不正確");
+      alert("❌ 網址格式錯誤");
       return;
     }
     localStorage.setItem('google_sheet_script_url', url);
@@ -120,225 +75,236 @@ const App: React.FC = () => {
     window.location.reload();
   };
 
-  const handleAddTransaction = async (newTx: Transaction) => {
-    if (useLocalOnly || dbStatus !== 'connected') {
+  const applyDefaultUrl = () => {
+    setScriptUrl(DEFAULT_URL);
+    localStorage.setItem('google_sheet_script_url', DEFAULT_URL);
+    alert("✅ 已填入預設連結，請點擊「儲存並啟用」以完成生效。");
+  };
+
+  const handleAddTransaction = async (newTx: Transaction): Promise<boolean> => {
+    if (useLocalOnly) {
       const updated = [newTx, ...transactions];
       setTransactions(updated);
       localStorage.setItem('local_transactions', JSON.stringify(updated));
-      if (dbStatus === 'connected') await dbService.save(newTx);
-    } else {
-      const success = await dbService.save(newTx);
-      if (success) setTransactions(prev => [newTx, ...prev]);
+      return true;
     }
+    if (!dbService.isConfigured()) {
+      alert("⚠️ 請先在『連線設定』中配置正確的網址");
+      setActiveTab('settings');
+      return false;
+    }
+    const success = await dbService.save(newTx);
+    if (success) {
+      setTransactions(prev => [newTx, ...prev]);
+      return true;
+    }
+    return false;
   };
 
   const handleDelete = async (id: string, type: TransactionType) => {
     if (!window.confirm("確定刪除此筆紀錄？")) return;
-    
     if (useLocalOnly) {
       const updated = transactions.filter(x => x.id !== id);
       setTransactions(updated);
       localStorage.setItem('local_transactions', JSON.stringify(updated));
     } else {
-      if (await dbService.delete(id, type)) {
+      const success = await dbService.delete(id, type);
+      if (success) {
         setTransactions(prev => prev.filter(x => x.id !== id));
       } else {
-        alert("刪除失敗，請檢查網路。");
+        alert("刪除失敗，請檢查網路連線。");
       }
     }
   };
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-[#f8fafc]">
+      {/* Sidebar */}
       <aside className="w-full lg:w-80 bg-slate-950 text-white p-8 flex flex-col shrink-0">
         <div className="flex items-center gap-4 mb-12">
           <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center font-black text-2xl shadow-lg">倉</div>
           <div>
             <h1 className="text-xl font-bold">倉管月結系統</h1>
-            <p className="text-[10px] text-indigo-400 font-bold tracking-widest uppercase">Multi-Sheet V4</p>
+            <p className="text-[10px] text-indigo-400 font-bold tracking-widest uppercase">Custom Sync V8.6</p>
           </div>
         </div>
         
         <nav className="space-y-2 flex-1">
-          <button onClick={() => setActiveTab('dashboard')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'dashboard' ? 'bg-indigo-600 font-bold shadow-lg shadow-indigo-500/20' : 'text-slate-400 hover:bg-slate-900'}`}>📊 數據儀表板</button>
-          <button onClick={() => setActiveTab('records')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'records' ? 'bg-indigo-600 font-bold' : 'text-slate-400 hover:bg-slate-900'}`}>📄 分類流水帳</button>
-          <button onClick={() => setActiveTab('ai')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'ai' ? 'bg-indigo-600 font-bold' : 'text-slate-400 hover:bg-slate-900'}`}>✨ AI 庫存分析</button>
+          <button onClick={() => setActiveTab('dashboard')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'dashboard' ? 'bg-indigo-600 font-bold shadow-lg' : 'text-slate-400 hover:bg-slate-900'}`}>📊 數據儀表板</button>
+          <button onClick={() => setActiveTab('records')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'records' ? 'bg-indigo-600 font-bold shadow-lg' : 'text-slate-400 hover:bg-slate-900'}`}>📄 分類流水帳</button>
+          <button onClick={() => setActiveTab('ai')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'ai' ? 'bg-indigo-600 font-bold shadow-lg' : 'text-slate-400 hover:bg-slate-900'}`}>✨ AI 庫存分析</button>
           <div className="mt-8 pt-8 border-t border-slate-900">
-            <button onClick={() => setActiveTab('settings')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-white text-slate-950 font-bold' : 'text-slate-500 hover:bg-slate-900'}`}>⚙️ 連線設定</button>
+            <button onClick={() => setActiveTab('settings')} className={`w-full text-left px-6 py-4 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-white text-slate-950 font-bold shadow-lg' : 'text-slate-500 hover:bg-slate-900'}`}>⚙️ 連線設定</button>
           </div>
         </nav>
 
         <div className="mt-8 bg-slate-900 p-6 rounded-2xl border border-slate-800">
           <div className="flex items-center gap-2 mb-2">
-            <span className={`w-2 h-2 rounded-full ${dbStatus === 'connected' ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{dbStatus === 'connected' ? '已連線雲端' : '本地儲存模式'}</span>
+            <span className={`w-2 h-2 rounded-full ${dbStatus === 'connected' ? 'bg-emerald-500' : dbStatus === 'local' ? 'bg-indigo-400' : 'bg-rose-500'}`}></span>
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+              {dbStatus === 'connected' ? '雲端同步中' : dbStatus === 'local' ? '本地模式' : '連線異常'}
+            </span>
           </div>
-          <p className="text-xs text-slate-500 font-bold mb-1">本月合計支出</p>
+          <p className="text-xs text-slate-500 font-bold mb-1">本月結算總額</p>
           <p className="text-2xl font-black">NT$ {transactions.reduce((s,t)=>s+t.total,0).toLocaleString()}</p>
         </div>
       </aside>
 
+      {/* Main Content */}
       <main className="flex-1 p-6 lg:p-12 overflow-y-auto">
-        {activeTab === 'settings' ? (
-          <div className="max-w-4xl mx-auto space-y-10 pb-20">
+        {isLoading && activeTab !== 'settings' ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center">
+              <div className="w-16 h-16 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+              <p className="text-slate-500 font-bold">正在讀取庫存...</p>
+            </div>
+          </div>
+        ) : activeTab === 'records' ? (
+          <div className="space-y-10 pb-20">
+            {/* 報表匯出中心 */}
+            <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border border-slate-100 flex flex-col md:flex-row items-center justify-between gap-6">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center text-2xl shadow-sm">📈</div>
+                <div>
+                  <h3 className="text-xl font-black text-slate-900">月份報表產生器</h3>
+                  <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">選取月份並匯出分頁 Excel 報表</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 w-full md:w-auto">
+                <input 
+                  type="month" 
+                  value={selectedExportMonth}
+                  onChange={(e) => setSelectedExportMonth(e.target.value)}
+                  className="px-6 py-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all"
+                />
+                <button 
+                  onClick={() => exportToExcel(transactions, selectedExportMonth)}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 py-4 rounded-2xl font-black shadow-lg shadow-emerald-500/20 flex items-center gap-2 transition-all active:scale-95 whitespace-nowrap"
+                >
+                  <span>📊</span> 匯出月結報表
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-[2.5rem] shadow-xl overflow-hidden border border-slate-100">
+              {/* List UI (same as before) */}
+              <div className="p-10 border-b border-slate-100 bg-slate-50/30">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-6">
+                  <h2 className="text-2xl font-black text-slate-900">分類核銷流水帳</h2>
+                  <div className="flex bg-white p-1 rounded-2xl shadow-inner border border-slate-100 overflow-x-auto max-w-full">
+                    <button onClick={() => setRecordFilter('全部')} className={`px-6 py-2.5 rounded-xl text-xs font-black transition-all whitespace-nowrap ${recordFilter === '全部' ? 'bg-slate-900 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>📂 全部彙整</button>
+                    {Object.values(TransactionType).map((f) => (
+                      <button key={f} onClick={() => setRecordFilter(f)} className={`px-6 py-2.5 rounded-xl text-xs font-black transition-all whitespace-nowrap ${recordFilter === f ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-600'}`}>📄 {f}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    <tr>
+                      <th className="px-8 py-6">日期 / 工作表</th>
+                      <th className="px-8 py-6">料件資訊</th>
+                      <th className="px-8 py-6">項目摘要</th>
+                      <th className="px-8 py-6 text-right">數量</th>
+                      <th className="px-8 py-6 text-right text-indigo-600">總計</th>
+                      <th className="px-8 py-6 text-center">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredTransactions.length === 0 ? (
+                      <tr><td colSpan={6} className="px-8 py-20 text-center text-slate-400 font-bold">尚無任何核銷紀錄</td></tr>
+                    ) : filteredTransactions.map(t => (
+                      <tr key={t.id} className="hover:bg-slate-50/50 transition-colors group">
+                        <td className="px-8 py-6">
+                          <p className="text-sm font-bold text-slate-500 mb-1">{t.date}</p>
+                          <span className={`px-3 py-1 rounded-full text-[10px] font-black ${t.type === TransactionType.INBOUND ? 'bg-indigo-100 text-indigo-700' : t.type === TransactionType.USAGE ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{t.type}</span>
+                        </td>
+                        <td className="px-8 py-6">
+                          <p className="font-bold text-slate-800">{t.materialName}</p>
+                          <p className="text-[10px] text-indigo-500 font-black mt-1">NO: {t.materialNumber}</p>
+                        </td>
+                        <td className="px-8 py-6 text-sm text-slate-700 font-medium">{t.itemName}</td>
+                        <td className="px-8 py-6 text-right font-bold text-slate-600">{t.quantity}</td>
+                        <td className="px-8 py-6 text-right font-black text-indigo-600 whitespace-nowrap">NT$ {t.total.toLocaleString()}</td>
+                        <td className="px-8 py-6 text-center">
+                          <button onClick={() => handleDelete(t.id, t.type)} className="w-10 h-10 flex items-center justify-center rounded-xl hover:bg-rose-50 text-slate-300 hover:text-rose-500 transition-all mx-auto">🗑️</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'dashboard' ? (
+          <div className="space-y-10">
+            <Dashboard transactions={transactions} />
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-10">
+              <div className="xl:col-span-4"><TransactionForm onAdd={handleAddTransaction} /></div>
+              <div className="xl:col-span-8 bg-white rounded-[2.5rem] shadow-xl p-10 border border-slate-50 overflow-hidden">
+                <h3 className="text-xl font-black mb-6 text-slate-900">近期異動紀錄</h3>
+                <div className="space-y-3">
+                  {transactions.slice(0, 5).map(t => (
+                    <div key={t.id} className="flex justify-between items-center p-5 bg-slate-50 rounded-2xl border border-transparent hover:border-indigo-100 transition-all">
+                      <div className="flex gap-4 items-center">
+                        <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center text-xs font-black shadow-sm text-slate-400">{String(t.materialNumber).slice(-2)}</div>
+                        <div>
+                          <p className="font-bold text-slate-900">{t.materialName}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{t.type} · NO: {t.materialNumber}</p>
+                        </div>
+                      </div>
+                      <p className="font-black text-indigo-600">NT$ {t.total.toLocaleString()}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'settings' ? (
+          <div className="max-w-4xl mx-auto pb-20">
             <div className="bg-white p-10 lg:p-16 rounded-[3rem] shadow-xl border border-slate-100">
-              <h2 className="text-3xl font-black text-slate-900 mb-6">Google Sheet 分類連線精靈</h2>
-              <p className="text-slate-500 mb-8">此版本將自動在您的試算表建立「進貨」、「用料」、「建置」三個分頁。</p>
-              
+              <div className="flex items-center justify-between mb-10">
+                <h2 className="text-3xl font-black text-slate-900">Google Sheet 分流設定</h2>
+                <button onClick={applyDefaultUrl} className="text-indigo-600 font-bold hover:underline text-sm">🔄 套用系統預設網址</button>
+              </div>
               <div className="space-y-12">
                 <section>
                   <div className="flex items-center gap-4 mb-6">
                     <span className="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black">1</span>
-                    <h3 className="text-xl font-bold">複製分類腳本代碼</h3>
+                    <h3 className="text-xl font-bold text-slate-900">當前部署網址</h3>
                   </div>
-                  <div className="relative group">
-                    <pre className="bg-slate-900 text-indigo-300 p-6 rounded-2xl text-[11px] font-mono overflow-x-auto max-h-48 scrollbar-thin">
-                      {GOOGLE_SCRIPT_CODE}
-                    </pre>
+                  <input 
+                    type="url" 
+                    className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:border-indigo-500 outline-none font-mono text-sm mb-6"
+                    value={scriptUrl}
+                    onChange={e => setScriptUrl(e.target.value)}
+                    placeholder="輸入 https://script.google.com/..."
+                  />
+                  <div className="grid grid-cols-2 gap-4">
                     <button 
-                      onClick={() => { navigator.clipboard.writeText(GOOGLE_SCRIPT_CODE); alert("代碼已複製！"); }}
-                      className="absolute top-4 right-4 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all"
+                      onClick={async () => {
+                        setIsTesting(true);
+                        const res = await dbService.testConnection(scriptUrl);
+                        setTestResult(res);
+                        setIsTesting(false);
+                      }}
+                      className="py-4 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm hover:bg-slate-200"
                     >
-                      📋 點擊複製
+                      {isTesting ? "測試中..." : "🔍 測試分流連線"}
                     </button>
+                    <button onClick={handleSaveSettings} className="py-4 bg-indigo-600 text-white rounded-xl font-black shadow-lg">🚀 儲存並啟用</button>
                   </div>
-                </section>
-
-                <section className="pt-10 border-t border-slate-100">
-                  <div className="flex items-center gap-4 mb-6">
-                    <span className="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-black">2</span>
-                    <h3 className="text-xl font-bold text-slate-900">輸入部署網址</h3>
-                  </div>
-                  <div className="space-y-4">
-                    <input 
-                      type="url" 
-                      className="w-full px-6 py-5 bg-slate-50 border-2 border-slate-200 rounded-2xl focus:border-indigo-500 outline-none font-mono text-sm"
-                      placeholder="https://script.google.com/macros/s/.../exec"
-                      value={scriptUrl}
-                      onChange={e => setScriptUrl(e.target.value)}
-                    />
-                    <div className="grid grid-cols-2 gap-4">
-                      <button 
-                        onClick={async () => {
-                          setIsTesting(true);
-                          const res = await dbService.testConnection(scriptUrl);
-                          setTestResult(res);
-                          setIsTesting(false);
-                        }}
-                        className="py-4 bg-slate-100 text-slate-600 rounded-xl font-bold text-sm hover:bg-slate-200"
-                      >
-                        {isTesting ? "連線測試中..." : "🔍 測試連線"}
-                      </button>
-                      <button onClick={handleSaveSettings} className="py-4 bg-indigo-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-indigo-200">
-                        🚀 儲存並啟用
-                      </button>
-                    </div>
-                  </div>
-
                   {testResult && (
-                    <div className={`mt-6 p-6 rounded-2xl border-2 ${testResult.success ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-                      <p className={`font-black mb-1 ${testResult.success ? 'text-emerald-700' : 'text-rose-700'}`}>{testResult.success ? '✅ 連線成功！' : '❌ 連線失敗'}</p>
-                      <p className="text-xs text-slate-600">{testResult.message}</p>
+                    <div className={`mt-4 p-4 rounded-xl text-sm font-bold ${testResult.success ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                      {testResult.message}
                     </div>
                   )}
                 </section>
               </div>
             </div>
           </div>
-        ) : (
-          <div className="space-y-10">
-            {activeTab === 'dashboard' && (
-              <>
-                <Dashboard transactions={transactions} />
-                <div className="grid grid-cols-1 xl:grid-cols-12 gap-10">
-                  <div className="xl:col-span-4"><TransactionForm onAdd={handleAddTransaction} /></div>
-                  <div className="xl:col-span-8 bg-white rounded-[2.5rem] shadow-xl p-10 border border-slate-50">
-                    <h3 className="text-xl font-black mb-6 text-slate-900">近期結算紀錄</h3>
-                    <div className="space-y-3">
-                      {transactions.slice(0, 5).map(t => (
-                        <div key={t.id} className="flex justify-between items-center p-5 bg-slate-50 rounded-2xl group hover:bg-white hover:shadow-md transition-all">
-                          <div>
-                            <p className="font-bold text-slate-900">{t.itemName}</p>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{t.date} · <span className="text-indigo-600">{t.type}</span></p>
-                          </div>
-                          <p className="font-black text-indigo-600">NT$ {t.total.toLocaleString()}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {activeTab === 'records' && (
-              <div className="bg-white rounded-[2.5rem] shadow-xl overflow-hidden border border-slate-100">
-                <div className="p-10 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
-                  <h2 className="text-2xl font-black text-slate-900">單據流水帳 (跨頁彙整)</h2>
-                  <button onClick={loadData} className="px-6 py-2 bg-white text-indigo-600 border border-indigo-100 rounded-xl text-sm font-bold">刷新數據</button>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                      <tr>
-                        <th className="px-8 py-6">日期</th>
-                        <th className="px-8 py-6">工作頁(類別)</th>
-                        <th className="px-8 py-6">品項名稱</th>
-                        <th className="px-8 py-6 text-right">總額</th>
-                        <th className="px-8 py-6 text-center">操作</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {transactions.map(t => (
-                        <tr key={t.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="px-8 py-6 text-sm font-bold text-slate-500">{t.date}</td>
-                          <td className="px-8 py-6">
-                            <span className={`px-3 py-1 rounded-full text-[10px] font-black ${
-                              t.type === TransactionType.INBOUND ? 'bg-indigo-100 text-indigo-700' :
-                              t.type === TransactionType.USAGE ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'
-                            }`}>{t.type}</span>
-                          </td>
-                          <td className="px-8 py-6 font-bold text-slate-800">{t.itemName}</td>
-                          <td className="px-8 py-6 text-right font-black text-indigo-600">NT$ {t.total.toLocaleString()}</td>
-                          <td className="px-8 py-6 text-center">
-                            <button onClick={() => handleDelete(t.id, t.type)} className="text-slate-300 hover:text-rose-500 transition-colors">🗑️</button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'ai' && (
-              <div className="max-w-4xl mx-auto space-y-10">
-                <div className="bg-indigo-600 p-16 rounded-[3rem] text-white text-center shadow-xl">
-                  <h2 className="text-3xl font-black mb-4">Gemini 數據洞察</h2>
-                  <p className="text-indigo-100 mb-8 opacity-80 font-medium">基於「進貨、用料、建置」三大工作表進行深度分析</p>
-                  <button 
-                    onClick={async () => {
-                      setIsAnalyzing(true);
-                      const report = await analyzeWarehouseData(transactions);
-                      setAiReport(report);
-                      setIsAnalyzing(false);
-                    }} 
-                    disabled={isAnalyzing || transactions.length === 0}
-                    className="bg-white text-indigo-600 px-12 py-4 rounded-2xl font-black shadow-xl hover:scale-105 transition-all disabled:opacity-50"
-                  >
-                    {isAnalyzing ? "分析中..." : "產生分析報告"}
-                  </button>
-                </div>
-                {aiReport && (
-                  <div className="bg-white p-12 rounded-[3rem] shadow-xl border border-slate-100 animate-in fade-in slide-in-from-bottom-8">
-                    <div className="prose prose-slate max-w-none">
-                      <div className="whitespace-pre-wrap font-medium text-slate-700 leading-relaxed">{aiReport}</div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+        ) : null}
       </main>
     </div>
   );

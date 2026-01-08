@@ -3,14 +3,18 @@ import React, { useState } from 'react';
 import { TransactionType, Transaction } from '../types';
 
 interface Props {
-  onAdd: (transaction: Transaction) => void;
+  onAdd: (transaction: Transaction) => Promise<boolean>;
 }
 
 const TransactionForm: React.FC<Props> = ({ onAdd }) => {
+  const [isSyncing, setIsSyncing] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
     type: TransactionType.INBOUND,
+    materialName: '',
+    materialNumber: '',
     itemName: '',
     quantity: 1,
     unitPrice: 0,
@@ -21,40 +25,65 @@ const TransactionForm: React.FC<Props> = ({ onAdd }) => {
     return 'tx-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.itemName.trim()) return;
+    console.log("Form: handleSubmit triggered");
 
-    // 確保數字欄位是真的數字，如果是空字串就給 0
-    const qty = Number(formData.quantity) || 0;
-    const price = Number(formData.unitPrice) || 0;
+    // 基本欄位驗證
+    if (!formData.materialName.trim() || !formData.itemName.trim()) {
+      alert("⚠️ 請完整填寫料件名稱與項目摘要");
+      return;
+    }
 
-    const newTransaction: Transaction = {
-      ...formData,
-      quantity: qty,
-      unitPrice: price,
-      id: generateSafeId(),
-      total: qty * price
-    };
-    
-    onAdd(newTransaction);
-    setIsSuccess(true);
-    setTimeout(() => setIsSuccess(false), 2000);
+    try {
+      setIsSyncing(true);
+      
+      const qty = Number(formData.quantity) || 0;
+      const price = Number(formData.unitPrice) || 0;
 
-    setFormData({
-      ...formData,
-      itemName: '',
-      quantity: 1,
-      unitPrice: 0,
-      note: ''
-    });
+      const newTransaction: Transaction = {
+        ...formData,
+        quantity: qty,
+        unitPrice: price,
+        id: generateSafeId(),
+        total: qty * price
+      };
+      
+      console.log("Form: Sending data to App component...", newTransaction);
+      const result = await onAdd(newTransaction);
+      
+      if (result) {
+        setIsSuccess(true);
+        console.log("Form: Save successful");
+        setTimeout(() => setIsSuccess(false), 2000);
+
+        // 重設表單
+        setFormData({
+          ...formData,
+          materialName: '',
+          materialNumber: '',
+          itemName: '',
+          quantity: 1,
+          unitPrice: 0,
+          note: ''
+        });
+      } else {
+        alert("❌ 儲存失敗！\n1. 請檢查網路連線\n2. 前往『連線設定』確認網址是否正確");
+      }
+    } catch (error) {
+      console.error("Form: Critical Error", error);
+      alert("⚠️ 系統發生錯誤，請稍後再試。");
+    } finally {
+      // 確保無論成功失敗，都要恢復按鈕狀態
+      setIsSyncing(false);
+    }
   };
 
   const inputClasses = "w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-[1.25rem] focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 focus:bg-white outline-none transition-all duration-300 text-slate-900 font-bold placeholder:text-slate-400 placeholder:font-medium";
   const labelClasses = "block text-xs font-black text-slate-500 uppercase tracking-widest mb-2.5 ml-1";
 
   return (
-    <form onSubmit={handleSubmit} className="bg-white p-10 rounded-[2.5rem] shadow-xl shadow-slate-200/50 border border-slate-100">
+    <form onSubmit={handleSubmit} className="bg-white p-10 rounded-[2.5rem] shadow-xl border border-slate-100">
       <div className="flex items-center gap-3 mb-8">
         <div className="w-2 h-8 bg-indigo-600 rounded-full"></div>
         <h3 className="text-2xl font-black text-slate-900 tracking-tight">新增核銷紀錄</h3>
@@ -86,11 +115,36 @@ const TransactionForm: React.FC<Props> = ({ onAdd }) => {
           </div>
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className={labelClasses}>料件名稱</label>
+            <input 
+              type="text" 
+              placeholder="例如: 伺服馬達"
+              required
+              className={inputClasses}
+              value={formData.materialName}
+              onChange={e => setFormData({...formData, materialName: e.target.value})}
+            />
+          </div>
+          <div>
+            <label className={labelClasses}>料號 (PN)</label>
+            <input 
+              type="text" 
+              placeholder="例如: MTR-001"
+              required
+              className={inputClasses}
+              value={formData.materialNumber}
+              onChange={e => setFormData({...formData, materialNumber: e.target.value})}
+            />
+          </div>
+        </div>
+
         <div>
-          <label className={labelClasses}>品項/項目名稱</label>
+          <label className={labelClasses}>項目 / 摘要名稱</label>
           <input 
             type="text" 
-            placeholder="請輸入正式品項名稱..."
+            placeholder="輸入結算說明..."
             required
             className={inputClasses}
             value={formData.itemName}
@@ -107,7 +161,7 @@ const TransactionForm: React.FC<Props> = ({ onAdd }) => {
               required
               className={inputClasses}
               value={formData.quantity}
-              onChange={e => setFormData({...formData, quantity: e.target.value as any})}
+              onChange={e => setFormData({...formData, quantity: Number(e.target.value)})}
             />
           </div>
           <div>
@@ -118,40 +172,36 @@ const TransactionForm: React.FC<Props> = ({ onAdd }) => {
               required
               className={inputClasses}
               value={formData.unitPrice}
-              onChange={e => setFormData({...formData, unitPrice: e.target.value as any})}
+              onChange={e => setFormData({...formData, unitPrice: Number(e.target.value)})}
             />
           </div>
-        </div>
-
-        <div>
-          <label className={labelClasses}>詳細備註 (選填)</label>
-          <textarea 
-            placeholder="輸入規格、廠商或其他資訊..."
-            className={`${inputClasses} min-h-[100px] resize-none`}
-            rows={3}
-            value={formData.note}
-            onChange={e => setFormData({...formData, note: e.target.value})}
-          />
         </div>
       </div>
 
       <button 
         type="submit"
-        disabled={isSuccess}
+        disabled={isSyncing || isSuccess}
         className={`mt-10 w-full font-black py-5 rounded-[1.5rem] transition-all duration-300 shadow-xl flex items-center justify-center gap-3 active:scale-95 ${
           isSuccess 
           ? "bg-emerald-500 text-white shadow-emerald-500/20" 
-          : "bg-slate-900 hover:bg-black text-white shadow-slate-900/10 hover:shadow-slate-900/30"
+          : isSyncing
+          ? "bg-slate-400 text-white cursor-not-allowed"
+          : "bg-slate-900 hover:bg-black text-white shadow-slate-900/10"
         }`}
       >
-        {isSuccess ? (
+        {isSyncing ? (
+          <>
+            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+            正在同步至 Google Sheets...
+          </>
+        ) : isSuccess ? (
           <>
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
-            已成功儲存至雲端
+            同步成功
           </>
         ) : (
           <>
-            <span>➕</span> 提交核銷紀錄
+            <span>💾</span> 儲存結算資料
           </>
         )}
       </button>

@@ -1,0 +1,5 @@
+{
+  "name": "倉儲月結管理系統 (Warehouse Monthly Settlement)",
+  "description": "一個專業的倉儲管理系統，專門用於記錄與分析單月進貨、用料及建置項目的結算數據，並結合 Gemini AI 提供庫存洞察。",
+  "requestFramePermissions": []
+}
